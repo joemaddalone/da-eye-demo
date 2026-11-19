@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Eye · photo tagger</title>
+  </head>
+  <body>
+    <header class="bar">
+      <div class="titles">
+        <h1>photos</h1>
+        <p id="status" class="status" role="status" aria-live="polite">Drop a photo or a folder to begin</p>
+      </div>
+      <div class="actions">
+        <button id="pick-photos" class="ghost" type="button" hidden>Add photos</button>
+        <button id="add-folder" class="ghost" type="button" hidden>Add folder</button>
+        <button id="clear-library" class="ghost" type="button" hidden>Clear current</button>
+        <button id="tag-button" class="pill" type="button" disabled>Tag Images</button>
+      </div>
+    </header>
+
+    <div id="progress" class="progress" hidden>
+      <div class="track"><span id="progress-fill"></span></div>
+    </div>
+
+    <section id="dropzone" class="dropzone">
+      <p class="dropzone-title">Drop photos or a folder of photos</p>
+      <p class="dropzone-hint">They are tagged in this tab. Nothing is uploaded.</p>
+      <div class="dropzone-actions">
+        <button id="pick-files" class="pill" type="button">Choose photos</button>
+        <button id="pick-folder" class="ghost" type="button">Choose folder</button>
+      </div>
+    </section>
+
+    <main>
+      <section id="overview" class="overview" hidden>
+        <div class="stats">
+          <div class="stat">
+            <span class="stat-value" id="stat-photos">0</span>
+            <span class="stat-label">photos</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="stat-tagged">0</span>
+            <span class="stat-label">tagged</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="stat-unsorted">0</span>
+            <span class="stat-label">unsorted</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="stat-tags">0</span>
+            <span class="stat-label">tags</span>
+          </div>
+        </div>
+
+        <p class="overview-hint">Pick a tag to see its photos. A photo can sit under more than one tag.</p>
+        <div id="tiles" class="tiles"></div>
+      </section>
+
+      <section id="detail" class="detail" hidden aria-labelledby="detail-title">
+        <div class="detail-head">
+          <button id="detail-back" class="ghost" type="button">← All tags</button>
+          <h2 id="detail-title"></h2>
+          <span id="detail-count" class="count"></span>
+        </div>
+        <div id="detail-grid" class="grid"></div>
+      </section>
+    </main>
+
+    <input id="file-input" type="file" accept="image/*" multiple hidden />
+    <input id="folder-input" type="file" webkitdirectory hidden />
+
+    <div id="dropveil" class="dropveil" hidden><span>Drop to load photos</span></div>
+
+    <dialog
+      id="photo-modal"
+      class="modal"
+      aria-labelledby="modal-title"
+      aria-keyshortcuts="ArrowLeft ArrowRight"
+    >
+      <div class="modal-shell">
+        <div class="modal-media">
+          <img id="modal-image" alt="" />
+        </div>
+        <div class="modal-body">
+          <header class="modal-head">
+            <div class="modal-titles">
+              <h2 id="modal-title"></h2>
+              <p id="modal-sub" class="modal-sub"></p>
+            </div>
+            <button id="modal-close" class="ghost" type="button">Close</button>
+          </header>
+          <div id="modal-content" class="modal-content"></div>
+        </div>
+      </div>
+    </dialog>
+
+    <footer class="foot">
+      Tagged on device by <a href="https://desertant.com/models/eye/">Eye</a>. Images never leave this browser.
+    </footer>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
