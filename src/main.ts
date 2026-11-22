@@ -1,5 +1,35 @@
 import "./style.css";
-import type { Analysis } from "@desert-ant-labs/eye";
+import type { Analysis, Eye } from "@desert-ant-labs/eye";
+
+// TEMPORARY reload forensic. If this tab comes back empty mid-run, the counter
+// says whether the document reloaded (a tab kill, or the browser restoring it)
+// or whether only the app's own state reset. Delete this block, the `bootCount`
+// line further down, and the extra status message once the iPhone reload is
+// explained.
+const BOOT_KEY = "eye:boot";
+const HIDDEN_KEY = "eye:last-hidden";
+let bootCount = 1;
+let lastHidden = 0;
+try {
+  bootCount = (Number(sessionStorage.getItem(BOOT_KEY)) || 0) + 1;
+  sessionStorage.setItem(BOOT_KEY, String(bootCount));
+  lastHidden = Number(sessionStorage.getItem(HIDDEN_KEY)) || 0;
+} catch {
+  // Storage can be denied; the counter is diagnostic, never load-bearing.
+}
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "hidden") return;
+  try {
+    sessionStorage.setItem(HIDDEN_KEY, String(Date.now()));
+  } catch {
+    // As above.
+  }
+});
+console.info("[eye] boot", {
+  bootCount,
+  navigationType: performance.getEntriesByType("navigation")[0]?.type ?? "unknown",
+  lastHidden: lastHidden ? `${Math.round((Date.now() - lastHidden) / 1000)}s before this load` : "never",
+});
 
 /** Some dropped files arrive without a MIME type, so fall back to the extension. */
 const IMAGE_EXTENSION = /\.(jpe?g|png|webp|avif|gif|bmp|heic|heif|tiff?)$/i;
@@ -65,6 +95,9 @@ interface Photo {
   failed: boolean;
   labels: string[];
   confidence: number;
+  /** The photo's own pixel size: the model is fed a downscaled copy. */
+  sourceWidth: number;
+  sourceHeight: number;
 }
 
 const statusEl = document.querySelector<HTMLElement>("#status")!;
@@ -125,6 +158,11 @@ let selected: string | null = null;
 syncChrome();
 render();
 
+// TEMPORARY: surface the forensic counter where a phone can show it.
+if (bootCount > 1) {
+  statusEl.textContent = `Reloaded ${bootCount - 1}× in this tab`;
+}
+
 button.addEventListener("click", tagImages);
 pickPhotos.addEventListener("click", () => fileInput.click());
 pickFiles.addEventListener("click", () => fileInput.click());
@@ -164,7 +202,52 @@ window.addEventListener("dragover", onDragOver);
 window.addEventListener("dragleave", onDragLeave);
 window.addEventListener("drop", onDrop);
 
-void enableIsolation();
+/**
+ * One model per page, not one per run. `Eye.load()` pulls ~45 MB of wasm and
+ * holds a large linear memory, and nothing ever released it: tagging a second
+ * batch stacked a second copy on top of the first. This keeps the first one.
+ */
+let eyeModel: Eye | null = null;
+
+async function loadEye(onProgress: (fraction: number) => void): Promise<Eye> {
+  if (eyeModel) return eyeModel;
+  const { Eye: Model } = await import("@desert-ant-labs/eye");
+  eyeModel = await Model.load({ accelerator: "auto", onProgress });
+  return eyeModel;
+}
+
+/**
+ * The long edge the model is fed. It resizes internally whatever it is given, so
+ * handing it a full 12 MP frame only bought transient memory: an ImageBitmap, a
+ * canvas backing store and an ImageData at 4032×3024 are ~48 MB each, and the
+ * SDK then copies the pixels into wasm linear memory on top of that.
+ */
+const ANALYSIS_EDGE = 1536;
+
+/**
+ * Decode once, downscale once, hand over RGBA. `analyze()` takes
+ * `{ data, width, height }` as readily as an image element, which also skips the
+ * copy it would otherwise make by re-drawing the photo into its own canvas.
+ */
+function analysisPixels(img: HTMLImageElement): ImageData {
+  const sourceWidth = img.naturalWidth || img.width;
+  const sourceHeight = img.naturalHeight || img.height;
+  if (!sourceWidth || !sourceHeight) throw new Error("the photo has no decoded size");
+
+  const scale = Math.min(1, ANALYSIS_EDGE / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const height = Math.max(1, Math.round(sourceHeight * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  // A software canvas keeps the pixels out of the GPU budget, which is the
+  // tighter one on iOS, and makes reading them back cheap.
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("no 2d canvas context");
+  context.drawImage(img, 0, 0, width, height);
+  return context.getImageData(0, 0, width, height);
+}
 
 async function tagImages() {
   if (running) return;
@@ -184,13 +267,9 @@ async function tagImages() {
 
   try {
     statusEl.textContent = "Loading the Eye model…";
-    const { Eye } = await import("@desert-ant-labs/eye");
-    const eye = await Eye.load({
-      accelerator: "auto",
-      onProgress: (fraction) => {
-        setProgress(fraction);
-        statusEl.textContent = `Downloading the Eye model… ${Math.round(fraction * 100)}%`;
-      },
+    const eye = await loadEye((fraction) => {
+      setProgress(fraction);
+      statusEl.textContent = `Downloading the Eye model… ${Math.round(fraction * 100)}%`;
     });
 
     statusEl.textContent = "Tagging…";
@@ -200,9 +279,12 @@ async function tagImages() {
       statusEl.textContent = `Tagging ${i + 1} of ${pending.length}…`;
 
       try {
-        // analyze() decodes the element itself, so it has to be fully loaded first.
+        // A downscaled copy needs the element decoded first, and the sizes are
+        // only known once it is.
         await photo.img.decode().catch(() => {});
-        photo.analysis = await eye.analyze(photo.img);
+        photo.sourceWidth = photo.img.naturalWidth || photo.img.width;
+        photo.sourceHeight = photo.img.naturalHeight || photo.img.height;
+        photo.analysis = await eye.analyze(analysisPixels(photo.img));
         const { labels, confidence } = describe(photo.analysis);
         photo.labels = labels;
         photo.confidence = confidence;
@@ -229,9 +311,7 @@ async function tagImages() {
     progressEl.hidden = true;
   } catch (error) {
     console.error("Eye failed to load", error);
-    statusEl.textContent = window.crossOriginIsolated
-      ? "The Eye model could not load. Check the console and your connection."
-      : "The Eye model could not load. This page is not cross-origin isolated, so the wasm runtime has no SharedArrayBuffer — see the console.";
+    statusEl.textContent = "The Eye model could not load. Check the console and your connection.";
     progressEl.hidden = true;
   } finally {
     running = false;
@@ -331,6 +411,8 @@ function makePhoto(file: File): Photo {
     failed: false,
     labels: [],
     confidence: 0,
+    sourceWidth: 0,
+    sourceHeight: 0,
   };
 
   card.addEventListener("click", () => showPhoto(photo));
@@ -395,36 +477,6 @@ function clearLibrary() {
   syncChrome();
   statusEl.textContent = "Drop a photo or a folder to begin";
   render();
-}
-
-/**
- * Static hosts cannot send COOP/COEP, so the page arrives without cross-origin
- * isolation and Eye's threaded wasm loses its SharedArrayBuffer. The service
- * worker in `public/coi-serviceworker.js` re-issues responses with those
- * headers; that only takes effect in the next document, hence the one reload.
- */
-async function enableIsolation() {
-  if (window.crossOriginIsolated || !("serviceWorker" in navigator)) return;
-
-  // One attempt per tab: if isolation still does not take, a reload loop would
-  // be far worse than a slower run.
-  const guard = "coi-isolation-attempted";
-  try {
-    if (sessionStorage.getItem(guard)) return;
-
-    const scope = import.meta.env.BASE_URL;
-    const registration = await navigator.serviceWorker.register(`${scope}coi-serviceworker.js`, { scope });
-    if (navigator.serviceWorker.controller) return;
-
-    sessionStorage.setItem(guard, "1");
-    if (registration.installing || registration.waiting) {
-      navigator.serviceWorker.addEventListener("controllerchange", () => location.reload(), { once: true });
-    } else {
-      location.reload();
-    }
-  } catch (error) {
-    console.warn("Cross-origin isolation is unavailable; Eye will run slower.", error);
-  }
 }
 
 function syncChrome() {
@@ -553,12 +605,22 @@ function stepPhoto(step: number) {
 function paintModal(photo: Photo) {
   const analysis = photo.analysis;
   modalSub.textContent = analysis
-    ? `${analysis.width} × ${analysis.height}${analysis.kind ? ` · ${pretty(analysis.kind)}` : ""}`
+    ? `${sourceSize(photo)}${analysis.kind ? ` · ${pretty(analysis.kind)}` : ""}`
     : photo.failed
       ? "Eye couldn't read this photo"
       : "Not tagged yet";
   modalContent.dataset.tagged = analysis ? "1" : "0";
   modalContent.replaceChildren(...analysisSections(photo));
+}
+
+/**
+ * The photo's own pixel size, not the size the model was fed: `analysis.width`
+ * describes the downscaled copy, and quoting it here would quietly lie about
+ * every full-resolution upload.
+ */
+function sourceSize(photo: Photo): string {
+  if (photo.sourceWidth && photo.sourceHeight) return `${photo.sourceWidth} × ${photo.sourceHeight}`;
+  return photo.analysis ? `${photo.analysis.width} × ${photo.analysis.height}` : "";
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -587,7 +649,7 @@ function analysisSections(photo: Photo): HTMLElement[] {
     return [panel(photo.failed ? "Tagging failed" : "Not tagged yet", element("p", "panel-note", note))];
   }
 
-  const sections = [filedPanel(photo), factsPanel(analysis), tagsPanel(analysis)];
+  const sections = [filedPanel(photo), factsPanel(photo), tagsPanel(analysis)];
   const optional = [
     scoresPanel(analysis),
     qualityPanel(analysis),
@@ -617,7 +679,10 @@ function filedPanel(photo: Photo): HTMLElement {
   return panel("Filed under", list);
 }
 
-function factsPanel(analysis: Analysis): HTMLElement {
+function factsPanel(photo: Photo): HTMLElement {
+  const analysis = photo.analysis;
+  if (!analysis) return panel("At a glance", element("p", "panel-note", "Not tagged yet"));
+
   const facts = element("div", "facts");
 
   const add = (label: string, value: string) => {
@@ -626,7 +691,7 @@ function factsPanel(analysis: Analysis): HTMLElement {
     facts.append(cell);
   };
 
-  add("Size", `${analysis.width} × ${analysis.height}`);
+  add("Size", sourceSize(photo));
   if (analysis.kind) add("Type", pretty(analysis.kind));
   add("Model", analysis.model);
   if (analysis.rotation) add("Turned", `${analysis.rotation}° clockwise`);

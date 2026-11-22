@@ -1,7 +1,8 @@
 {
   "dependencies": {
     "@desert-ant-labs/eye": "^4.3.0",
-    "@litertjs/core": "^2.6.0"
+    "@litertjs/core": "^2.6.0",
+    "gh-pages": "^6.3.0"
   },
   "devDependencies": {
     "vite": "^8.3.8"
@@ -12,6 +13,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "build:gh": "BASE_PATH=relative vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build:gh && gh-pages -d dist"
   }
 }
